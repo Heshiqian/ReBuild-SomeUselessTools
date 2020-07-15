@@ -5,6 +5,7 @@ import cn.heshiqian.database.Column;
 import cn.heshiqian.database.Query;
 import cn.heshiqian.database.Row;
 import cn.heshiqian.database.Table;
+import cn.heshiqian.database.tool.Utils;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -23,30 +24,41 @@ public class QueryImpl implements Query, Serializable {
 
     @Override
     public Row getRowByIndex(int idx) {
+        if (idx >= table.getRows().size())
+            throw new IndexOutOfBoundsException("不存在这个数据下标: "+idx);
         return table.getRows().get(idx);
     }
 
     @Override
     public Row[] getRowsByWhere(Where where) {
         ArrayList<Row> rows = new ArrayList<>();
-        QueryWhereImpl queryWhere = (QueryWhereImpl)where;
-        HashMap<String, String> kv = queryWhere.getKv();
-        Iterator<Map.Entry<String, String>> iterator;
-        int whereCount = kv.size();
+        String[] syntax = where.getSyntax();
+        String[][] ready = new String[syntax.length][];
+        for (int i = 0; i < ready.length; i++) {
+            ready[i] = Utils.splitByAndSymbol(syntax[i]);
+        }
+        int whereCount = syntax.length;
         int shootCount;
         for (Row row : table.getRows()) {
             shootCount = 0;
-            iterator = kv.entrySet().iterator();
-            while (iterator.hasNext()) {
-                Map.Entry<String, String> next = iterator.next();
-                String key = next.getKey();
-                String value = next.getValue();
-                Column column = row.getColumns().get(key);
-                if (column != null && column.getString().equals(value))
-                    shootCount++;
+            for (String[] exp : ready) {
+                String key = exp[0];
+                String name = key.substring(4);
+                String value = exp[1];
+                Column column = row.getColumns().get(name);
+                if (key.startsWith("EQL_")) {
+                    if (column != null && column.getString().equals(value))
+                        shootCount++;
+                } else if (key.startsWith("EXP_")) {
+                    if (column != null && column.getString().matches(value))
+                        shootCount++;
+                } else if (key.startsWith("COT_")) {
+                    if (column != null && column.getString().contains(value))
+                        shootCount++;
+                }
             }
             //如果一行中，判断条件重合次数与where长度相同则代表该Row为要寻找的Row
-            if (shootCount==whereCount)
+            if (shootCount == whereCount)
                 rows.add(row);
         }
         return rows.toArray(new Row[]{});

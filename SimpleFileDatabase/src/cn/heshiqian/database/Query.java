@@ -1,6 +1,5 @@
 package cn.heshiqian.database;
 
-
 import cn.heshiqian.database.impl.QueryWhereImpl;
 
 public interface Query {
@@ -10,12 +9,13 @@ public interface Query {
     Row[] getRowsByWhere(Where where);
 
 
+    public static Where where(){
+        return new QueryWhereImpl();
+    }
     interface Where {
-        Where addWhere(String name, String arg);
-        static Where where(String name, String arg){
-            QueryWhereImpl queryWhere = new QueryWhereImpl();
-            queryWhere.addWhere(name,arg);
-            return queryWhere;
-        }
+        Where equals(String name, String arg);
+        Where like(String name, String exp);
+        Where contain(String name, String arg);
+        String[] getSyntax();
     }
 }

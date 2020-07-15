@@ -6,6 +6,16 @@ import java.util.Arrays;
 
 public final class Utils {
 
+
+
+    public static String[] splitByAndSymbol(String src){
+        int index = src.indexOf("&");
+        String[] strings = new String[2];
+        strings[0]=src.substring(0,index);
+        strings[1]=src.substring(index + 1);
+        return strings;
+    }
+
     public static boolean checkFileHead(byte[] head,byte[] src){
         return Arrays.equals(head,src);
     }

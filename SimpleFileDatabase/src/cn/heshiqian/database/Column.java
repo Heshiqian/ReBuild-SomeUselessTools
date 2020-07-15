@@ -11,7 +11,7 @@ public interface Column {
     long getLong();
     Object getOrigin();
 
-    public static Column column(String key, Object data){
+    static Column column(String key, Object data){
         return new ColumnImpl(key,data);
     }
 }

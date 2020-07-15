@@ -17,7 +17,7 @@ public class Table implements Serializable {
     private Date updateTime;
     private String[] columnNames;
     private int size;
-    private Query query=new QueryImpl(this);
+    private Query query = new QueryImpl(this);
 
     public Table(){}
     public Table(Database database){

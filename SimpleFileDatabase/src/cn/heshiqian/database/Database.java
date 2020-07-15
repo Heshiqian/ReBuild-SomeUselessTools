@@ -3,11 +3,13 @@ package cn.heshiqian.database;
 import cn.heshiqian.database.exception.ColumnIllegalException;
 import cn.heshiqian.database.exception.InitDatabaseException;
 import cn.heshiqian.database.exception.TableNotExistException;
+import cn.heshiqian.database.impl.ReUsableObjectOutputStream;
 import cn.heshiqian.database.tool.ExecuteTimer;
 import cn.heshiqian.database.tool.Log;
 import cn.heshiqian.database.tool.Utils;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -17,7 +19,14 @@ public final class Database {
     public static class Property{
         private boolean enabledBigDataMode = false;
         private boolean objectStreamUseOffset = false;
+        private boolean silenceMode = false;
         private int offsetSize = 0x13;
+        public void setSilenceMode(boolean silenceMode) {
+            this.silenceMode = silenceMode;
+        }
+        public boolean isSilenceMode() {
+            return silenceMode;
+        }
         public boolean isEnabledBigDataMode() {
             return enabledBigDataMode;
         }
@@ -86,7 +95,8 @@ public final class Database {
         //证明为新库，没必要继续执行下面的代码
         if (size == 0) return;
         if (size > DB_TOO_BIG){
-            Log.info("[waring] 数据量过大，在保存或加载时可能过慢，建议使用大数据量模式存储");
+//            Log.info("[waring] 数据量过大，在保存或加载时可能过慢，建议使用大数据量模式存储");
+            Log.info("[waring] 数据量过大，在保存或加载时可能过慢");
         }
         tableIndexMap.clear();
         tables.clear();
@@ -212,9 +222,9 @@ public final class Database {
                     //不存在该表的索引，证明该表为新表，追加到文件中
                     saveTableToAfterFileEnd(table);
                 }else {
-                    //存在该表，需要移动偏移
+                    //存在该表，需要重新计算偏移
                     //耗时
-
+                    expandTableFile(table);
                 }
             } else {
                 //大数量存储
@@ -228,42 +238,33 @@ public final class Database {
         } finally {
             recoverOriginDatabase();
         }
+    }
 
-        /*if (tableIndexMap.containsKey(table)) {
-            //已存在则替换，需要前后合并
-            try {
-                backupOriginDatabase();
-                ExecuteTimer.Timer timer = ExecuteTimer.getNewTimerAndBeginCount();
-                TableIndex tableIndex = tableIndexMap.get(table);
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                ObjectOutputStream oos = new ObjectOutputStream(baos);
-                oos.writeObject(table);
-                oos.flush();
-                FileInputStream dfis = new FileInputStream(databaseFile);
-                long size = dfis.getChannel().size();
-                byte[] memoryByte = new byte[(int) size];
-                dfis.read(memoryByte);
-                byte[] objBytes = baos.toByteArray();
-                byte[] backBytes = Arrays.copyOfRange(memoryByte, tableIndex.end, memoryByte.length);
-                byte[] frontBytes = Arrays.copyOfRange(memoryByte, 0, tableIndex.start + 6);
-                FileOutputStream fos = new FileOutputStream(databaseFile);
-                fos.write(frontBytes);
-                fos.write(objBytes);
-                fos.write(backBytes);
-                fos.close();
-                rebuildTableLinked();
-                Log.info("已保存表");
-                Log.info("保存时间："+timer.stop()+"ms");
-            } catch (IOException e) {
-                e.printStackTrace();
-                Log.error("保存表失败");
-                synchronized (lock){
-                    setRollBackFlag();
-                }
-            } finally {
-                recoverOriginDatabase();
-            }*/
-
+    /**
+     * 表需要扩容，此方法可能阻塞过长时间
+     * @param table 即将扩容的表
+     */
+    protected void expandTableFile(Table table) throws IOException{
+        /* 2020/7/14 - 23:38
+         * 扩容其中一个表，需要保存该表前后的数据
+         * 然后重新输出该表
+         * 该操作可能导致所有表位偏移，还得重新计算该库的所有表位
+         * 综上所述还不如直接将内存的所有表重新持久化
+         */
+        FileOutputStream fos = new FileOutputStream(databaseFile);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ReUsableObjectOutputStream oos = new ReUsableObjectOutputStream(baos);
+        baos.write(dbProperties.isEnabledBigDataMode()?MODE_BIG:MODE_NORMAL);
+        baos.writeTo(fos);
+        for (Table t : tables.values()) {
+            baos.reset();
+            baos.write(TABLE_FLAG_BG);
+            oos.write(t);
+            baos.write(TABLE_FLAG_EOF);
+            baos.writeTo(fos);
+        }
+        fos.close();
+        rebuildTableLinked();
     }
 
     protected void saveTableToAfterFileEnd(Table table) throws IOException{
@@ -279,6 +280,7 @@ public final class Database {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ObjectOutputStream oos = new ObjectOutputStream(baos);
         bufferedOutputStream.write(TABLE_FLAG_BG);
+        bufferedOutputStream.flush();
         oos.writeObject(table);
         oos.flush();
         bufferedOutputStream.write(baos.toByteArray());
@@ -297,14 +299,16 @@ public final class Database {
         timer.start();
         try {
             FileInputStream dfis = new FileInputStream(databaseFile);
+            BufferedInputStream bufferedInputStream = new BufferedInputStream(dfis);
             long size = dfis.getChannel().size();
             byte[] memoryByte = new byte[(int) size];
-            dfis.read(memoryByte);
+            bufferedInputStream.read(memoryByte);
             buildTableLinked(size, memoryByte);
+            bufferedInputStream.close();
             dfis.close();
         } catch (IOException | ClassNotFoundException e) {
             e.printStackTrace();
-            Log.error("初始化数据库失败！");
+            Log.error("重建映射失败！");
         }
         long stop = timer.stop();
         Log.info("重新建立映射花费 --> "+stop+"ms");
@@ -332,24 +336,26 @@ public final class Database {
     }
 
     private void backupOriginDatabase() {
-        ExecuteTimer.Timer time = ExecuteTimer.getNewTimerAndBeginCount();
-        try {
-            FileInputStream fis = new FileInputStream(databaseFile);
-            FileChannel channel = fis.getChannel();
-            FileOutputStream fos = new FileOutputStream("DB.temp");
-            channel.transferTo(0, channel.size(), fos.getChannel());
-            fos.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            Log.info("备份源库耗时："+time.stop()+"ms");
+        if (!ROLL_BACK_FLAG){
+            ExecuteTimer.Timer time = ExecuteTimer.getNewTimerAndBeginCount();
+            try {
+                FileInputStream fis = new FileInputStream(databaseFile);
+                FileChannel channel = fis.getChannel();
+                FileOutputStream fos = new FileOutputStream("DB.temp");
+                channel.transferTo(0, channel.size(), fos.getChannel());
+                fos.close();fis.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }finally {
+                Log.info("备份源库耗时："+time.stop()+"ms");
+            }
         }
     }
 
-    private void setRollBackFlag(){
+    void setRollBackFlag(){
         ROLL_BACK_FLAG = true;
     }
-    private void clearRollBackFlag(){
+    void clearRollBackFlag(){
         ROLL_BACK_FLAG = false;
     }
 
@@ -407,7 +413,7 @@ public final class Database {
 
         private static Database loadDatabaseIntoHolder(String dbName) {
             Database database = new Database();
-            File file = new File(dbName);
+            File file = new File(dbName+".dat");
             if (!file.exists()) {
                 try {
                     file.createNewFile();
@@ -439,7 +445,7 @@ public final class Database {
     }
 
     public static Database getInstance() {
-        return getInstance("DATABASE.dat");
+        return getInstance("DATABASE");
     }
 
     private static class TableIndex {
